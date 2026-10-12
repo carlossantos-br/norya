@@ -45,6 +45,28 @@ const AUTH_URL_RE = new RegExp(
     '|auth\\.openai\\.com|chatgpt\\.com|platform\\.openai\\.com|accounts\\.google\\.com' + // known hosts
   ')[^\\s\\x1b]*)', 'i');
 
+// Hosts de login dos providers. A URL raspada da SAÍDA do terminal só abre na
+// aba de login se o host (parseado, não por regex no texto) for um destes: sem
+// isso, qualquer `https://x/login` impresso durante o login — um README, um log
+// de dependência — abriria na aba que o usuário trata como a do provider.
+const AUTH_HOSTS = [
+  'openai.com', 'chatgpt.com', 'anthropic.com', 'claude.ai', 'claude.com',
+  'x.ai', 'grok.com', 'google.com', 'openrouter.ai', 'opencode.ai', 'github.com',
+];
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** URL http(s) válida? (`fromPty`: também exige host de provider ou loopback.) */
+function isAcceptableAuthUrl(raw, { fromPty = false } = {}) {
+  let u;
+  try { u = new URL(String(raw)); } catch { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  if (!fromPty) return true;
+  const h = u.hostname.toLowerCase();
+  if (LOOPBACK.has(h)) return true;
+  if (u.protocol !== 'https:') return false;
+  return AUTH_HOSTS.some(d => h === d || h.endsWith('.' + d));
+}
+
 class AuthFlowRouter extends EventEmitter {
   /**
    * @param {object} opts
@@ -218,7 +240,7 @@ class AuthFlowRouter extends EventEmitter {
     // streaming. Matching a bare prefix would emit a TRUNCATED URL while the TUI
     // is still printing it. The rolling buffer + next chunk completes it.
     const tokens = clean.match(/https?:\/\/[^\s]+(?=\s)/g) || [];
-    const full = tokens.find((u) => AUTH_URL_RE.test(u));
+    const full = tokens.find((u) => AUTH_URL_RE.test(u) && isAcceptableAuthUrl(u, { fromPty: true }));
     if (full) {
       this._handleUrl(profileId, full, Date.now());
     }
@@ -251,6 +273,9 @@ class AuthFlowRouter extends EventEmitter {
     const state = this._sessions.get(profileId);
     if (!state) return;
     if (state.urlEmitted) return; // dedupe
+    // Pelo socket chega o que a própria CLI passou ao $BROWSER: aceita qualquer
+    // host, mas só http(s) — nunca file:, javascript: ou esquema de app.
+    if (!isAcceptableAuthUrl(url)) return;
 
     state.urlEmitted = true;
     this.emit('auth-url', { profileId, url, ts });
@@ -270,3 +295,4 @@ class AuthFlowRouter extends EventEmitter {
 
 module.exports = AuthFlowRouter;
 module.exports.socketPathFor = socketPathFor;
+module.exports.isAcceptableAuthUrl = isAcceptableAuthUrl;

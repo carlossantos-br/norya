@@ -84,7 +84,7 @@ t('named pipe leva o usuário; dois usuários não colidem', () => {
   assert.notStrictEqual(win.ipcEndpoint('events-u'), outro.ipcEndpoint('events-u'));
   assert.strictEqual(win.uidTag(), 'u');
   assert.strictEqual(mac.uidTag(), String(process.getuid()));
-  assert.strictEqual(mac.ipcEndpoint('auth-1'), '/tmp/norya-auth-1.sock', 'macOS intocado');
+  assert.ok(mac.ipcEndpoint('auth-1').endsWith(`/norya-${process.getuid()}/norya-auth-1.sock`), 'macOS: pasta privada');
 });
 
 // ── Processos filhos ─────────────────────────────────────────────────────────

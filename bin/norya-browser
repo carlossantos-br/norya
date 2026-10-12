@@ -9,7 +9,7 @@
  * the result to stdout as pretty-printed JSON.
  *
  * Usage:
- *   NORYA_BROWSER_MCP_SOCKET=/tmp/norya-browser-42.sock \
+ *   NORYA_BROWSER_MCP_SOCKET=$TMPDIR/norya-501/norya-browser-42.sock \
  *     norya-browser browser_list_tabs
  *
  *   norya-browser browser_open --url=https://example.com --new_tab=true

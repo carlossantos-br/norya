@@ -173,7 +173,7 @@ idempotência (2ª adoção volta `already_paginated`) e a recusa de providers s
 caminho de adoção.
 
 Gotcha ambiental: `open-shim.test.js` caso 4 ("sem socket nenhum") FALHA se o
-Norya de produção estiver aberto — o socket real `/tmp/norya-open-<uid>.sock`
+Norya de produção estiver aberto — o socket real `<tmp>/norya-<uid>/norya-open-<uid>.sock`
 existe e o shim roteia pra ele em vez de cair no `open` do sistema. Rodar esse
 teste com o app fechado.
 

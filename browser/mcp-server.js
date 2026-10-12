@@ -19,7 +19,6 @@ const net = require('net');
 const platform = require('../platform');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,8 +27,7 @@ const os = require('os');
 /**
  * Caminho do socket do MCP deste perfil.
  *
- * `os.tmpdir()` no macOS é o diretório privado do usuário sob /var/folders/, NUNCA
- * /tmp. Até 2026-07-10 o main.js injetava `/tmp/norya-browser-N.sock` no ambiente
+ * Fica na pasta privada de sockets do platform (<tmp>/norya-<uid>, 0700). Até 2026-07-10 o main.js injetava `/tmp/norya-browser-N.sock` no ambiente
  * do PTY enquanto o servidor escutava aqui — as duas pontas nunca se encontraram,
  * e a automação do navegador por agente nunca funcionou. Exportado para que exista
  * UMA fonte da verdade.
@@ -37,7 +35,7 @@ const os = require('os');
 function socketPathFor(profileId) {
   // Windows: `\\.\pipe\norya-browser-N`. O `net` do Node fala named pipe com o
   // MESMO listen()/connect() do socket Unix — só o caminho muda.
-  return platform.ipcEndpoint(`browser-${profileId}`, { dir: os.tmpdir() });
+  return platform.ipcEndpoint(`browser-${profileId}`);
 }
 
 function unlinkIfExists(sockPath) {

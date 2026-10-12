@@ -47,7 +47,7 @@ profile's browser panel opened so the Unix socket exists.
 **Default profile:** 1  
 **Override:** `NORYA_TEST_PROFILE=N` to test a different profile.
 
-**What is tested (connects to `/tmp/norya-browser-<profile>.sock`):**
+**What is tested (connects to the per-user socket from `MCPServer.socketPathFor()`):**
 
 | Test | Checks |
 |------|--------|

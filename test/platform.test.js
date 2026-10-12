@@ -15,6 +15,8 @@
  */
 const assert = require('assert');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const { makePlatform, quotePosix, quotePwsh } = require('../platform');
 
 let n = 0;
@@ -156,8 +158,18 @@ t('prependPath aceita array (é como o agentPathDirs entra)', () => {
 });
 
 // ── IPC ──────────────────────────────────────────────────────────────────────
-t('macOS: caminhos de socket idênticos aos de hoje', () => {
-  assert.strictEqual(mac.ipcEndpoint('auth-999'), '/tmp/norya-auth-999.sock');
+t('macOS: sockets na pasta privada por usuário (nunca no /tmp compartilhado)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'norya-run-'));
+  const priv = makePlatform({ platform: 'darwin', env: {}, homedir: HOME_MAC, exists: () => false, tmpdir: tmp });
+  const sock = priv.ipcEndpoint('auth-999');
+  assert.strictEqual(sock, path.join(tmp, `norya-${process.getuid()}`, 'norya-auth-999.sock'));
+  assert.strictEqual(fs.statSync(path.dirname(sock)).mode & 0o777, 0o700);
+  // Symlink plantado no lugar da pasta: recusa (fail-closed).
+  const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'norya-run-'));
+  fs.symlinkSync(tmp, path.join(tmp2, `norya-${process.getuid()}`));
+  const plantado = makePlatform({ platform: 'darwin', env: {}, homedir: HOME_MAC, exists: () => false, tmpdir: tmp2 });
+  assert.throws(() => plantado.ipcEndpoint('auth-1'), /não é uma pasta própria/);
+  fs.rmSync(tmp, { recursive: true, force: true }); fs.rmSync(tmp2, { recursive: true, force: true });
   assert.strictEqual(mac.ipcEndpoint('browser-3', { dir: '/var/folders/tmp' }),
     '/var/folders/tmp/norya-browser-3.sock');
 });

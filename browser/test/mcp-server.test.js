@@ -118,7 +118,7 @@ const stubBrowserManager = {
 // ---------------------------------------------------------------------------
 
 const PROFILE_ID = 999;
-const SOCK_PATH = path.join(os.tmpdir(), `norya-browser-${PROFILE_ID}.sock`);
+const SOCK_PATH = MCPServer.socketPathFor(PROFILE_ID);
 
 async function runTests() {
   log('\n=== MCPServer smoke test ===\n');

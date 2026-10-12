@@ -81,8 +81,11 @@ function sleep(ms) {
     assert.ok(result999.env.BROWSER, 'env.BROWSER must be set');
     assert.strictEqual(result999.env.NORYA_AUTH_SOCKET, result999.socketPath,
       'env.NORYA_AUTH_SOCKET must equal socketPath');
-    assert.strictEqual(result999.socketPath, '/tmp/norya-auth-999.sock',
-      'socketPath must follow /tmp/norya-auth-<profileId>.sock pattern');
+    assert.strictEqual(result999.socketPath, AuthFlowRouter.socketPathFor(999),
+      'socketPath must come from socketPathFor()');
+    assert.ok(!result999.socketPath.startsWith('/tmp/norya-auth'), 'socket never in shared /tmp');
+    const runDir = require('path').dirname(result999.socketPath);
+    assert.strictEqual(fs.statSync(runDir).mode & 0o077, 0, 'socket dir must be private (0700)');
 
     log('  PASS – socketPath and env are correct');
 
@@ -183,7 +186,7 @@ function sleep(ms) {
     // -----------------------------------------------------------------------
     log('[test 7] stop() removes socket files');
 
-    const sock999 = '/tmp/norya-auth-999.sock';
+    const sock999 = AuthFlowRouter.socketPathFor(999);
 
     // Profile 999 is still active (we never stopped it).
     await router.stop(999);
@@ -197,7 +200,7 @@ function sleep(ms) {
     assert.strictEqual(sock999Exists, false, 'Socket for profile 999 must be deleted after stop()');
 
     // Profile 998 was already stopped by markComplete — socket should be gone.
-    const sock998 = '/tmp/norya-auth-998.sock';
+    const sock998 = AuthFlowRouter.socketPathFor(998);
     let sock998Exists = true;
     try {
       await fs.promises.access(sock998);
@@ -207,6 +210,22 @@ function sleep(ms) {
     assert.strictEqual(sock998Exists, false, 'Socket for profile 998 must be deleted after markComplete()');
 
     log('  PASS – socket files cleaned up');
+
+    log('[test 8] only provider hosts from PTY output; only http(s) ever');
+    const ok = AuthFlowRouter.isAcceptableAuthUrl;
+    for (const u of ['https://auth.openai.com/oauth/authorize?x', 'https://claude.ai/oauth/authorize',
+      'https://accounts.google.com/oauth/authorize', 'http://localhost:1455/auth/callback?code=1']) {
+      assert.ok(ok(u, { fromPty: true }), `PTY must accept ${u}`);
+    }
+    for (const u of ['https://evil.com/login', 'https://evil.com/?r=auth.openai.com',
+      'https://auth.openai.com.evil.com/x', 'https://evilchatgpt.com/oauth', 'http://chatgpt.com/oauth']) {
+      assert.ok(!ok(u, { fromPty: true }), `PTY must reject ${u}`);
+    }
+    assert.ok(ok('https://any-provider.example/device'), 'socket (CLI $BROWSER) accepts any https host');
+    for (const u of ['javascript:alert(1)//login', 'file:///etc/passwd?login', 'not a url']) {
+      assert.ok(!ok(u), `never accept ${u}`);
+    }
+    log('  PASS – auth URL validation');
 
     // -----------------------------------------------------------------------
     // All tests passed

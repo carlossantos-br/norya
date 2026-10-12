@@ -245,9 +245,27 @@ function makePlatform(opts = {}) {
     return typeof process.getuid === 'function' ? String(process.getuid()) : 'u';
   }
 
+  // Pasta PRIVADA dos sockets no POSIX. `/tmp/norya-*.sock` era previsível num
+  // diretório de todos: outro usuário da máquina podia criar o caminho antes e
+  // receber a URL de OAuth (ou fazer o listen falhar). Agora: <tmp>/norya-<uid>,
+  // 0700, dono conferido, nunca symlink — fail-closed se alguém plantou algo.
+  let _runDir = opts.runDir || null;
+  function privateRunDir() {
+    if (_runDir) return _runDir;
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+    const dir = p.join(opts.tmpdir || os.tmpdir(), `norya-${uid == null ? 'u' : uid}`);
+    try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    const st = fs.lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`norya: ${dir} não é uma pasta própria`);
+    if (uid != null && st.uid !== uid) throw new Error(`norya: ${dir} pertence a outro usuário`);
+    if ((st.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
+    _runDir = dir;
+    return dir;
+  }
+
   function ipcEndpoint(nome, { dir } = {}) {
     if (isWin) return `\\\\.\\pipe\\norya-${userTag()}-${nome}`;
-    return p.join(dir || '/tmp', `norya-${nome}.sock`);
+    return p.join(dir || privateRunDir(), `norya-${nome}.sock`);
   }
 
   function isPipe(caminho) {
