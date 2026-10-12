@@ -1,0 +1,16 @@
+#!/usr/bin/env node
+const net = require('net');
+const url = process.argv[2];
+const sock = process.env.NORYA_AUTH_SOCKET;
+if (!url || !sock) {
+  console.error('norya-auth-open: missing url arg or NORYA_AUTH_SOCKET env');
+  process.exit(1);
+}
+const client = net.createConnection(sock, () => {
+  client.write(JSON.stringify({ url, ts: Date.now() }));
+  client.end();
+});
+client.on('error', (e) => {
+  console.error('norya-auth-open:', e.message);
+  process.exit(2);
+});

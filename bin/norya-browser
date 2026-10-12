@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * norya-browser
+ *
+ * CLI wrapper for non-MCP agents (e.g. Aider).
+ * Sends a single JSON-RPC call to the MCPServer Unix socket and prints
+ * the result to stdout as pretty-printed JSON.
+ *
+ * Usage:
+ *   NORYA_BROWSER_MCP_SOCKET=/tmp/norya-browser-42.sock \
+ *     norya-browser browser_list_tabs
+ *
+ *   norya-browser browser_open --url=https://example.com --new_tab=true
+ *
+ *   norya-browser browser_screenshot --full_page=true
+ *
+ * Exits:
+ *   0  success
+ *   1  usage / env error
+ *   2  RPC error returned by server
+ *   3  JSON parse error on response
+ *   4  network / socket error
+ */
+
+const net = require('net');
+
+const sock = process.env.NORYA_BROWSER_MCP_SOCKET;
+if (!sock) {
+  console.error('NORYA_BROWSER_MCP_SOCKET not set');
+  process.exit(1);
+}
+
+const [, , cmd, ...args] = process.argv;
+if (!cmd) {
+  console.error('usage: norya-browser <method> [--key=value ...]');
+  process.exit(1);
+}
+
+// Parse --key=value flags, coercing types.
+const params = {};
+for (const a of args) {
+  const m = a.match(/^--([^=]+)=(.*)$/);
+  if (m) {
+    let v = m[2];
+    if (v === 'true') v = true;
+    else if (v === 'false') v = false;
+    else if (v.trim() !== '' && !isNaN(+v)) v = +v;
+    params[m[1]] = v;
+  }
+}
+
+const req = { jsonrpc: '2.0', id: 1, method: cmd, params };
+
+const client = net.createConnection(sock, () => {
+  client.write(JSON.stringify(req) + '\n');
+  // Half-close so the server's 'end' event fires; server responds then closes.
+  client.end();
+});
+
+let buf = '';
+client.on('data', (d) => { buf += d; });
+
+client.on('end', () => {
+  try {
+    const lines = buf.split('\n').filter(Boolean);
+    const resp = JSON.parse(lines[lines.length - 1]);
+    if (resp.error) {
+      console.error(resp.error.message);
+      process.exit(2);
+    }
+    console.log(JSON.stringify(resp.result, null, 2));
+  } catch (e) {
+    console.error('parse error:', e.message);
+    process.exit(3);
+  }
+});
+
+client.on('error', (e) => {
+  console.error(e.message);
+  process.exit(4);
+});

@@ -1,0 +1,128 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Empacotamento do Norya para Windows — gerado A PARTIR DO MAC.
+#
+# Isto só é possível porque o node-pty 1.1.0 usa node-addon-api (N-API, ABI
+# estável) e JÁ TRAZ os binários win32 dentro do pacote npm
+# (node_modules/node-pty/prebuilds/win32-x64). Não há nada para compilar: o
+# electron-builder baixa o Electron win32, copia os arquivos e monta o NSIS.
+#
+# Por isso `npmRebuild: false` — deixar o electron-builder tentar recompilar o
+# node-pty aqui só produziria um binário de macOS dentro de um app de Windows.
+#
+# Uso:  npm run dist:win
+# ─────────────────────────────────────────────────────────────────────────────
+appId: ai.norya.app
+productName: Norya
+copyright: Norya
+electronVersion: 41.2.1
+
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
+directories:
+  output: dist
+  buildResources: build
+
+# ── Por que SEM asar ─────────────────────────────────────────────────────────
+#
+# O caminho Windows do node-pty faz duas coisas que o asar não suporta, e nenhuma
+# delas falha de um jeito visível:
+#
+#   1. `new Worker(join(__dirname, 'worker/conoutSocketWorker.js'))` — roda em
+#      TODO terminal ConPTY. Dentro do asar, `__dirname` é `.../app.asar/...`,
+#      um caminho que o worker_threads não lê. Sintoma: o pane abre e nunca
+#      recebe um byte.
+#   2. `child_process.fork(join(__dirname, 'conpty_console_list_agent'))` — usado
+#      ao matar um PTY. `fork` não lê de dentro do asar (o patch do Electron
+#      cobre `fs`, não `child_process`), e o fallback é um timeout de 5 s.
+#
+# `asarUnpack` não resolve: o módulo continua sendo RESOLVIDO pelo caminho
+# `app.asar/...`, que é o que vai parar no `__dirname`. Só há duas saídas
+# honestas — corrigir os caminhos dentro do node-pty (patch em dependência de
+# terceiro, que some no próximo `npm install`) ou não usar asar. O VS Code, que
+# usa o mesmo node-pty, também o mantém desempacotado.
+#
+# O que se perde: os arquivos ficam soltos em resources/app/ em vez de num
+# arquivo só. Não havia proteção nenhuma a perder — asar não é criptografia.
+asar: false
+
+# Allowlist — test/win-package-files.test.js prova que todo require() que o
+# app alcança (main.js, test-window.html e os scripts do renderer) está aqui.
+# Arquivo novo na raiz sem entrar nesta lista = app de Windows que morre no
+# boot com "Cannot find module" (aconteceu com ui-prefs.js, chat/, token-stats).
+files:
+  - "main.js"
+  - "platform.js"
+  - "norya-home.js"
+  - "claude-meta.js"
+  - "ui-prefs.js"
+  - "token-stats.js"
+  - "pricing.js"
+  - "fx.js"
+  - "test-window.html"
+  - "package.json"
+  - "agents/**"
+  - "chat/**"
+  # pet/ só roda no macOS (o require é preguiçoso), mas vai junto: é JS puro e
+  # o verificador de require() do pacote não sabe o que é preguiçoso.
+  - "pet/**"
+  - "renderer/**"
+  - "browser/**"
+  - "!browser/test/**"
+  - "quota/**"
+  - "!quota/test/**"
+  - "helpers/badge-icon.js"
+  # O hook de eventos do Claude (som de fim de turno) — roda como script do node.exe.
+  - "helpers/norya-claude-event.js"
+  - "assets/**"
+  - "!assets/icon.iconset/**"
+  # Mini (mascote) é só do macOS, e os sprites não são deste projeto.
+  - "!assets/pet/**"
+  - "branding/**"
+  - "bin/**"
+  - "node_modules/**"
+  # ── node-pty: o que NÃO pode entrar ──────────────────────────────────────
+  # build/Release é o binário compilado AQUI (macOS). O loader do node-pty
+  # (lib/utils.js) procura build/Release ANTES de prebuilds/ — deixá-lo no
+  # pacote faria o app de Windows tentar carregar um .node de Mach-O e morrer
+  # no primeiro spawn de terminal.
+  - "!node_modules/node-pty/build/**"
+  - "!node_modules/node-pty/prebuilds/darwin-*/**"
+  # Binário de macOS que sobrou de um electron-rebuild antigo. O loader do
+  # node-pty nem olha para `bin/`, mas um .node de Mach-O dentro de um app de
+  # Windows é confusão garantida na próxima vez que alguém for depurar.
+  - "!node_modules/node-pty/bin/**"
+  - "!node_modules/node-pty/prebuilds/win32-arm64/**"
+  - "!node_modules/node-pty/src/**"
+  - "!node_modules/node-pty/deps/**"
+  # Símbolos de depuração: 60 MB que ninguém usa em produção.
+  - "!**/*.pdb"
+  - "!**/{test,tests,__tests__,spec,example,examples,docs,doc}/**"
+  - "!**/*.{md,markdown,map,ts,flow}"
+  - "!**/.{git,github,vscode,idea,DS_Store}"
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: Norya-Setup-${version}-x64.${ext}
+  # Sem certificado de assinatura: o SmartScreen vai avisar na 1ª execução.
+  # Declarado aqui para o electron-builder não procurar um certificado e falhar.
+  signAndEditExecutable: true
+  verifyUpdateCodeSignature: false
+
+nsis:
+  oneClick: false
+  perMachine: false                       # instala em %LOCALAPPDATA%, sem UAC
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Norya
+  deleteAppDataOnUninstall: false         # ~/.norya é do usuário, não do instalador
+  installerLanguages:
+    - pt_BR
+    - en_US
+  language: "1046"

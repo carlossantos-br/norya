@@ -1,0 +1,24 @@
+node_modules/
+*.bak*
+.DS_Store
+wt-agents/
+
+# Saída do empacotamento (electron-builder). 350 MB desempacotados + o NSIS.
+dist/
+# Ícone gerado por build/make-ico.js — deriva de assets/icon.iconset.
+build/icon.ico
+__pycache__/
+*.pyc
+
+# Fora do repositório público
+# Sprites do Mini: extraídos localmente dos apps instalados (tools/pet-assets.py).
+assets/pet/
+# Notas de trabalho locais (specs/planos internos) e arquivos de agente pessoais.
+docs/superpowers/
+docs/2026-07-14-analise-cockpit-massivo.md
+AGENTS.md
+CLAUDE.md
+.remember/
+.superpowers/
+_vault-inbox/
+.claude/

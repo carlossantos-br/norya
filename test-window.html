@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Norya</title>
+<script>
+  // Apply theme synchronously so the splash background paints with the
+  // correct color on the very first frame (no flash of wrong theme).
+  (function () {
+    try {
+      var t = localStorage.getItem('norya-theme');
+      if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+    } catch (_) {}
+    // Vidro (2026-09-07): a decisão vive em platform.js (única camada que
+    // pode olhar process.platform). Com `data-glass`, os tokens do CSS viram
+    // rgba sobre a vibrancy/mica da janela; sem ele, ficam opacos.
+    try {
+      var p = require('./platform');
+      // O vidro precisa de DOIS sins: a plataforma sabe fazer (platform.glass)
+      // e o usuário pediu (ui-prefs, Ajustes → Aparência). Desde 2026-09-08 o
+      // padrão é NÃO — ver ui-prefs.js para a medição. Aqui no <head> e não
+      // depois: se `data-glass` chegasse após o 1º paint, a janela nasceria
+      // opaca e "acenderia" translúcida no meio do boot.
+      var vidro = false;
+      try { vidro = require('./ui-prefs').glassLigado(); } catch (_) {}
+      if (p.glass && vidro) document.documentElement.dataset.glass = p.glass;
+      document.documentElement.dataset.platform = p.platform;
+    } catch (_) {}
+  })();
+</script>
+<link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css">
+<link rel="stylesheet" href="renderer/styles.css">
+</head>
+<body>
+<!-- Boot splash (auto-removes after animation completes) -->
+<div id="norya-splash" aria-hidden="true">
+  <img src="branding/norya-logo-black.png" alt="" class="splash-logo light-only">
+  <img src="branding/norya-logo-white.png" alt="" class="splash-logo dark-only">
+</div>
+<script>
+  // Strip the splash from the DOM after the bg animation finishes
+  (function () {
+    var splash = document.getElementById('norya-splash');
+    if (!splash) return;
+    var done = false;
+    function remove() { if (done) return; done = true; try { splash.parentNode.removeChild(splash); } catch (_) {} }
+    splash.addEventListener('animationend', function (e) { if (e.animationName === 'norya-splash-bg' || e.animationName === 'norya-splash-quick') remove(); });
+    setTimeout(remove, 1100); // safety net
+  })();
+</script>
+
+<!-- Full-page background animation (only visible during landing) -->
+<div class="ntp-bg" id="ntpBg" aria-hidden="true"></div>
+
+<div class="app" id="app">
+
+  <!-- ── Sidebar ────────────────────────────────────────────────────────
+       Uma coluna só (2026-09-07, liquid glass). O rail de 52px morreu: a
+       navegação global (Tasks / Usage / Browser / Settings) vive AQUI dentro,
+       com os MESMOS ids e data-rail de antes — rail.js continua dono deles.
+       Recolhida (body.sidebar-collapsed), o botão #sidebarExpand do header
+       principal traz de volta; ⌘. também. -->
+  <div class="sidebar" id="sidebar">
+    <!-- Barra da coluna (38px, drag region): semáforo do macOS à esquerda
+         (hiddenInset), toggle de recolher à direita. -->
+    <div class="sidebar-bar">
+      <button class="sidebar-toggle-btn" id="sidebarToggle" type="button" title="Hide sidebar (⌘.)" aria-label="Hide sidebar">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="2.5"/><path d="M6 2.5v11"/></svg>
+      </button>
+    </div>
+
+    <div class="sidebar-top">
+      <button class="new-thread-btn" id="btnNewThread">
+        <span class="ntb-label">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+            <path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          New Task
+        </span>
+        <span class="ntb-kbd"><span class="kbd">⌘</span><span class="kbd">N</span></span>
+      </button>
+      <!-- Seletor de agente: qual CLI roda a PRÓXIMA thread. Fica logo abaixo do
+           New Thread porque modifica a ação dele. Uma linha, do mesmo tamanho e
+           linguagem visual dos irmãos (2026-07-10). -->
+      <div class="agent-picker" id="agentPicker">
+        <button type="button" class="agent-picker-btn is-auto" id="agentPickerBtn" title="Which CLI runs the next task">
+          <span class="ap-icon" aria-hidden="true">◆</span>
+          <span class="ap-label">Automático</span>
+          <span class="ap-sub"></span>
+          <svg class="ap-chev" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+            <path d="M2.5 4l2.5 2.5L7.5 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="agent-menu hidden" id="agentMenu" role="menu"></div>
+      </div>
+      <!-- Como o PRÓXIMO pane abre: terminal (TUI) ou conversa (chat). Chat só
+           para Claude e Codex; as outras CLIs abrem em TUI de qualquer jeito. -->
+      <div class="pane-ui-toggle" id="paneUiToggle" role="radiogroup" title="How the next task opens (Claude and Codex)">
+        <button type="button" data-ui="tui" role="radio">TUI</button>
+        <button type="button" data-ui="chat" role="radio">Chat</button>
+      </div>
+    </div>
+
+    <!-- Nav global. Mesmos ids/data-rail do rail antigo (rail.js). -->
+    <nav class="rail" id="rail" aria-label="Navegação principal">
+      <button class="rail-btn" id="railThreads" data-rail="threads" data-label="Sessões" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <path d="M4 6h16M4 12h16M4 18h10"/>
+        </svg>
+        <span class="rail-label">Sessões</span>
+      </button>
+      <button class="rail-btn" id="railUso" data-rail="uso" data-label="Uso das assinaturas" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <path d="M4 15a8 8 0 1 1 16 0"/><path d="M12 15l4.2-4.2"/>
+        </svg>
+        <span class="rail-label">Usage</span>
+        <span class="rail-dot" id="railUsoDot" hidden></span>
+      </button>
+      <button class="rail-btn" id="railBrowser" data-rail="browser" data-label="Navegador" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.6" ry="8.5"/><path d="M3.7 9.5h16.6M3.7 14.5h16.6"/>
+        </svg>
+        <span class="rail-label">Browser</span>
+        <span class="rail-kbd"><span class="kbd">⌘</span><span class="kbd">B</span></span>
+      </button>
+      <button class="rail-btn" id="railSkills" data-rail="skills" data-label="Biblioteca de skills" type="button" aria-haspopup="dialog" aria-controls="skillsDialog">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg>
+        <span class="rail-label">Skills</span>
+      </button>
+    </nav>
+
+    <!-- Painel: Sessões abertas (2026-10-10: busca e lista de tasks/projetos saíram da tela) -->
+    <div class="side-panel" id="panelThreads">
+      <!-- Attention queue: panes esperando o usuário (motor em renderer/attention.js).
+           Pinada ACIMA da lista de threads; some quando vazia. -->
+      <div id="attentionQueue" style="display:none"></div>
+
+      <!-- Project list -->
+      <div class="project-list" id="projectList"></div>
+    </div><!-- /panelThreads -->
+
+   <!-- Painel: Uso das assinaturas -->
+   <div class="side-panel" id="panelUso" hidden>
+     <div class="panel-title">
+       <span>Uso das assinaturas</span>
+       <button type="button" id="usoRefreshAll" title="Atualizar todas">↻</button>
+     </div>
+     <div class="uso-list" id="usoList"></div>
+   </div>
+
+    <!-- Rodapé: perfil ativo + Settings -->
+    <div class="bottom-bar" style="position: relative;">
+      <!-- Profile button (Fase 2) — single button showing active profile -->
+      <button class="profile-button empty" id="profileButton" title="Select a profile">
+        <span class="profile-button-dot empty" id="profileButtonDot"></span>
+        <span class="profile-button-name" id="profileButtonName">Select a profile</span>
+        <svg class="profile-button-chev" viewBox="0 0 10 10" fill="none"><path d="M2.5 6.5l2.5-2.5 2.5 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="profile-dropdown hidden" id="profileDropdown" role="menu"></div>
+
+      <!-- Legacy accounts list — kept hidden so existing JS that targets
+           .acc-item elements still finds them (renders cross-references
+           inside this list). Will be fully removed once renderer is refactored. -->
+      <div class="accounts-bar legacy-hidden" id="accountsBar">
+        <div class="acc-bar-header" id="accountsHeader">
+          <div class="acc-bar-left">
+            <svg class="acc-bar-chev" viewBox="0 0 10 10" fill="none"><path d="M2.5 4l2.5 2.5L7.5 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="acc-bar-label">Accounts</span>
+            <span class="acc-bar-count" id="accCount"></span>
+          </div>
+          <button class="btn-add-acc" id="btnAddAcc" title="Add account">+</button>
+        </div>
+        <div id="accountList"></div>
+      </div>
+      <div class="side-tools">
+      <button class="rail-btn side-settings-btn" id="railConfig" data-rail="config" data-label="Configurações" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+        </svg>
+        <span class="rail-label">Settings</span>
+        <span class="rail-kbd"><span class="kbd">⌘</span><span class="kbd">,</span></span>
+      </button>
+      <button class="rail-btn provider-updates-trigger" id="railUpdates" type="button" aria-label="Atualizações dos providers" title="Atualizações dos providers">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-2L20 8M4 16l2.3 3A7 7 0 0 0 17.9 17"/></svg>
+        <span id="providerUpdatesBadge" hidden></span>
+      </button>
+      </div>
+    </div>
+
+    <!-- Alça de largura (modals.js: bindSidebarResizer) -->
+    <div class="sidebar-resizer" id="sidebarResizer" title="Drag to resize · double-click to reset"></div>
+  </div>
+
+  <!-- ── Main ───────────────────────────── -->
+  <div class="main">
+
+    <div class="main-header">
+      <div class="header-left">
+        <!-- Só aparece com a sidebar recolhida (CSS). -->
+        <button class="header-btn header-icon-btn header-sidebar-btn" id="sidebarExpand" type="button" title="Show sidebar (⌘.)" aria-label="Show sidebar">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="2.5"/><path d="M6 2.5v11"/></svg>
+        </button>
+        <span class="header-title" id="headerTitle"></span>
+        <span class="header-sub" id="headerSub"></span>
+      </div>
+      <div class="header-right">
+        <!-- Fase 8: Merge Queue button moved to thread toolbar; kept here hidden
+             for any code that still references #btnMergeQueue directly. -->
+        <button class="header-btn" id="btnMergeQueue" title="Merge Queue" style="display:none">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="4" cy="3" r="1.6"/>
+            <circle cx="4" cy="13" r="1.6"/>
+            <circle cx="12" cy="8" r="1.6"/>
+            <path d="M4 4.5v7"/>
+            <path d="M4 8h5l1-.5 1.5-1"/>
+          </svg>
+          Merges
+        </button>
+        <!-- Grid é a ÚNICA view (2026-07-10): o rail (⊞ Grid) e o ⌘G bastam.
+             Os antigos #btnNoryaGrid e #viewSelect (que ficavam hidden aqui só
+             pelos atalhos/refs) saíram na Task 12 — não havia mais toggle. -->
+        <button class="header-btn danger hidden" id="btnKillTerminal">■ Stop</button>
+        <button class="header-btn" id="btnCloseThread" title="Close thread — back to start (the session keeps running)" style="display:none">✕ Close</button>
+        <button class="header-btn" id="btnThreadFolder" title="Change working folder — restarts this thread in the chosen folder" style="display:none">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M1 4a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1z"/></svg>
+          <span id="threadFolderLabel">Home</span>
+        </button>
+        <!-- O navegador vive no rail (🌐 Navegador). #btnNoryaBrowser segue hidden
+             só como âncora do togglePanel de browser.js (2026-07-10). -->
+        <button class="header-btn" id="btnNoryaBrowser" title="Navegador" style="display:none">🌐</button>
+        <button class="header-btn header-awake-btn" id="btnKeepAwake" type="button" title="Tela sempre acesa: desligada" aria-pressed="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <span>Tela acesa</span>
+        </button>
+        <button class="header-btn" id="btnLogs" title="Show logs (⌘L)">Logs</button>
+        <button class="header-btn" id="btnMoreHeader" title="More actions" aria-label="More actions">···</button>
+      </div>
+    </div>
+
+    <!-- Single view output -->
+    <div class="output-area" id="outputArea">
+      <!-- Raw terminal (kept hidden by default; toggle with ⌘\ for debugging) -->
+      <div class="xterm-host" id="xtermHost" style="display:none"></div>
+      <div class="output-empty hidden" id="outputEmpty">
+        <div class="output-empty-logo" id="emptyLogo">
+          <img src="branding/norya-logo-black.png" alt="Norya" class="brand-logo light-only">
+          <img src="branding/norya-logo-white.png" alt="Norya" class="brand-logo dark-only">
+        </div>
+        <div class="output-empty-phrase" id="emptyPhrase">Build something that matters.</div>
+        <div class="output-empty-sub" id="emptySub">Select a thread, or press ⌘N for a new one.</div>
+      </div>
+
+      <!-- New Thread center panel: stays within output area only -->
+      <div class="new-thread-panel hidden" id="newThreadPanel">
+        <div class="ntp-content">
+          <div class="ntp-logo">
+            <img src="branding/norya-logo-black.png" alt="Norya" class="brand-logo light-only">
+            <img src="branding/norya-logo-white.png" alt="Norya" class="brand-logo dark-only">
+          </div>
+          <div class="ntp-phrase" id="ntpPhrase"></div>
+          <div class="ntp-pickers" style="display:none">
+            <!-- Fase 7 hotfix: perfil ativo agora vive no canto inferior (#profileButton).
+                 Mantemos o select escondido pra não quebrar listeners que ainda referenciam ele. -->
+            <select class="ntp-picker" id="ntpAccountSel">
+              <option value="">Pick account…</option>
+            </select>
+          </div>
+          <div class="ntp-card pi-box" style="max-width:620px;width:100%;padding:14px 16px;">
+            <textarea class="pi-field" id="ntpField" rows="1" placeholder="Describe what you want to build…" style="font-size: 15px;min-height:26px;"></textarea>
+            <div class="pi-actions norya-toolbar-disabled" id="ntpPiActions" title="Composer toolbar disabled — coming soon">
+              <div class="pi-actions-left">
+                <span class="norya-disabled-badge" title="Toolbar parked — coming soon">disabled</span>
+                <button class="pi-folder-pill ntp-folder-btn" id="ntpPickFolderBtn" type="button" title="Pick the folder you want to work in">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M1 4a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1z"/>
+                  </svg>
+                  <span id="ntpFolderLabel">Select project</span>
+                </button>
+                <div class="pi-divider"></div>
+                <div style="position: relative;">
+                  <button class="pi-branch-btn main hidden" id="ntpBranchBtn" type="button" title="Branch / worktree">
+                    <span class="pi-branch-btn-dot"></span>
+                    <span class="pi-branch-btn-label" id="ntpBranchLabel">main</span>
+                  </button>
+                  <div class="pi-branch-pop hidden" id="ntpBranchPop" role="menu"></div>
+                </div>
+                <div class="pi-divider"></div>
+                <button class="pi-toggle" data-toggle="search" title="Web search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
+                  <span class="pi-toggle-label">Search</span>
+                </button>
+                <div class="pi-divider"></div>
+                <button class="pi-toggle" data-toggle="fast" title="/fast (priority service tier)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                  <span class="pi-toggle-label">Fast</span>
+                </button>
+              </div>
+              <div class="pi-actions-right">
+                <button class="pi-icon-btn" id="ntpSlashBtn" title="Codex slash commands">
+                  <span style="font-weight:600;font-size:14px;line-height:1">/</span>
+                </button>
+                <button class="pi-icon-btn" id="ntpConfigBtn" title="Model · account · effort · full access">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+                </button>
+                <button class="pi-send" id="ntpSendBtn" disabled title="Send (Enter)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <!-- agent/branches: live slug preview when "+ Novo worktree" is selected -->
+          <div class="ntp-slug-preview hidden" id="ntpSlugPreview" title="Slug computed from the prompt — click to edit before send">
+            <span class="ntp-slug-preview-arrow">→</span>
+            <span class="ntp-slug-preview-name" id="ntpSlugPreviewName">wt/thread</span>
+            <button type="button" class="ntp-slug-preview-edit" id="ntpSlugPreviewEdit" title="Edit slug">edit</button>
+          </div>
+          <div class="ntp-hint" id="ntpHint">Choose a profile and project to start.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Grid view -->
+    <!-- 2026-07-24: o composer do grid (chip Focused/All panes + campo + envio)
+         foi REMOVIDO. Cada pane é um terminal — digita-se direto nele. -->
+    <div class="grid-area" id="gridArea"></div>
+
+    <!-- Input -->
+    <div class="input-area">
+      <div class="pi-box" id="inputBox">
+        <div class="pi-attachments" id="attachmentStrip"></div>
+        <textarea class="pi-field" id="inputField" rows="1" placeholder="Start a thread to send input…" disabled></textarea>
+        <!-- Norya 2026-05-28 (#6): prompt-composer toolbar (the left action row:
+             attach / branch / fork / merge / search / fast) is PARKED — greyed +
+             non-interactive but kept visible so the user remembers it exists.
+             The right-side send / stop / config controls stay fully functional. -->
+        <div class="pi-actions norya-toolbar-disabled" id="inputPiActions" title="Composer toolbar disabled — coming soon">
+          <div class="pi-actions-left">
+            <span class="norya-disabled-badge" title="Toolbar parked — coming soon">disabled</span>
+            <button class="pi-icon-btn" id="btnPickFolder" title="Attach image / pick folder">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <button class="pi-profile-pill hidden" id="btnInputProfile" type="button" title="This thread owner — click to switch">
+              <span class="pi-profile-pill-dot" id="btnInputProfileDot"></span>
+              <span class="pi-profile-pill-name" id="btnInputProfileName">--</span>
+            </button>
+            <button class="pi-branch-readonly hidden" id="btnInputBranch" type="button" title="This thread branch — click to copy (use Fork to work on another)">
+              <span class="pi-branch-readonly-dot" id="btnInputBranchDot"></span>
+              <span class="pi-branch-readonly-label" id="btnInputBranchLabel">main</span>
+              <!-- agent/branches: tiny lock icon makes the read-only nature obvious -->
+              <svg class="pi-branch-readonly-lock" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2.5" y="5.5" width="7" height="5" rx="1"/>
+                <path d="M4 5.5V4a2 2 0 0 1 4 0v1.5"/>
+              </svg>
+            </button>
+            <button class="pi-folder-pill hidden" id="btnInputFolder" type="button" title="Change folder — restarts the terminal in the new cwd">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 5a1 1 0 0 1 1-1h3l2 2h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5z"/>
+              </svg>
+              <span id="btnInputFolderLabel">folder</span>
+            </button>
+            <button class="pi-fork-btn disabled" id="btnFork" type="button" title="Fork: creates a new worktree from this thread">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="4" cy="3" r="1.6"/>
+                <circle cx="4" cy="13" r="1.6"/>
+                <circle cx="12" cy="6" r="1.6"/>
+                <path d="M4 4.5v7"/>
+                <path d="M4 7c0-1 0.5-2 2-2h3"/>
+              </svg>
+              <span>Fork</span>
+            </button>
+            <button class="pi-merge-btn disabled" id="btnMergeToolbar" type="button" title="Merge Queue (precisa de Workspaces)">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="4" cy="3" r="1.6"/>
+                <circle cx="4" cy="13" r="1.6"/>
+                <circle cx="12" cy="8" r="1.6"/>
+                <path d="M4 4.5v7"/>
+                <path d="M4 8h5l1-.5 1.5-1"/>
+              </svg>
+              <span>Merge</span>
+              <span class="merge-badge-dot empty" id="mergeBadgeDot" title="Pre-merge status"></span>
+            </button>
+            <button class="pi-toggle" data-toggle="search" title="Web search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
+              <span class="pi-toggle-label">Search</span>
+            </button>
+            <div class="pi-divider"></div>
+            <button class="pi-toggle" data-toggle="fast" title="/fast (priority service tier)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              <span class="pi-toggle-label">Fast</span>
+            </button>
+          </div>
+          <div class="pi-actions-right">
+            <button class="pi-icon-btn" id="btnSlashMenu" title="Codex slash commands">
+              <span style="font-weight:600;font-size:14px;line-height:1">/</span>
+            </button>
+            <button class="pi-icon-btn" id="btnToolbarConfig" title="Model · account · effort · full access">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+            </button>
+            <button class="pi-stop-btn hidden" id="inputKillBtn" title="Interromper agente (Esc)">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
+              <span>Stop</span>
+            </button>
+            <button class="pi-send" id="sendBtn" disabled title="Send (Enter)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="toolbar-config-pop hidden" id="toolbarConfigPop">
+        <div class="tc-section" data-tc-section="reasoning">
+          <div class="tc-section-title">Reasoning effort (Think)</div>
+          <div class="tc-pills">
+            <button class="tc-pill" data-effort="low">Low</button>
+            <button class="tc-pill" data-effort="medium">Medium</button>
+            <button class="tc-pill" data-effort="high">High</button>
+            <button class="tc-pill active" data-effort="xhigh">XHigh</button>
+          </div>
+        </div>
+        <div class="tc-section" data-tc-section="mode">
+          <div class="tc-section-title">Mode</div>
+          <div class="tc-toggle-row">
+            <label class="tc-toggle"><input type="checkbox" id="toolbarFullAccess" checked> <span>Full access (bypass sandbox)</span></label>
+          </div>
+        </div>
+        <div class="tc-section" data-tc-section="model">
+          <div class="tc-section-title" id="toolbarModelTitle">Model</div>
+          <select class="tc-select" id="toolbarModel">
+            <option value="">Default (codex picks)</option>
+          </select>
+          <div class="tc-section-hint" id="toolbarModelHint" style="display:none;font-size:11px;color:var(--text-faint);margin-top:6px"></div>
+        </div>
+        <div class="tc-section" data-tc-section="account">
+          <div class="tc-section-title">Account override</div>
+          <select class="tc-select" id="toolbarAccount" title="Override account for next thread">
+            <option value="">Auto (current selection)</option>
+          </select>
+        </div>
+      </div>
+      <div class="toolbar-slash-pop hidden" id="toolbarSlashPop"></div>
+      <input type="file" id="imageFileInput" accept="image/*" multiple style="display:none">
+    </div>
+
+  </div>
+</div>
+
+<!-- ── In-app Log Viewer (right-side dock panel) ───────────── -->
+<aside id="logsDock" class="logs-dock hidden">
+  <div class="logs-dock-header">
+    <span class="logs-dock-title">Norya Logs</span>
+    <div class="logs-dock-actions">
+      <button class="logs-dock-btn" id="btnLogsCopy" title="Copy all">⧉</button>
+      <button class="logs-dock-btn" id="btnLogsClear" title="Clear">⌫</button>
+      <button class="logs-dock-btn" id="btnLogsClose" title="Close (⌘L)">✕</button>
+    </div>
+  </div>
+  <pre id="logsContent" class="logs-dock-content"></pre>
+</aside>
+
+<!-- ── Settings modal ──────────────────────────────── -->
+<div class="modal-overlay hidden" id="modalSettings">
+  <div class="modal-box settings-box">
+    <!-- Left sidebar nav -->
+    <div class="settings-sidebar">
+      <div class="settings-drag" aria-hidden="true"></div>
+      <nav class="settings-nav">
+        <button class="snav-item active" data-tab="general"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.5 4.5h7M12.5 4.5h1M2.5 11.5h1M6.5 11.5h7"/><circle cx="11" cy="4.5" r="1.5"/><circle cx="5" cy="11.5" r="1.5"/></svg>General</button>
+        <button class="snav-item" data-tab="profiles"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.8-2.3 2.7-3.5 5-3.5s4.2 1.2 5 3.5"/></svg>Profiles</button>
+        <button class="snav-item" data-tab="stats"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.5 13.5h11M4.5 11V8M8 11V4.5M11.5 11V6.5"/></svg>Estatísticas</button>
+      </nav>
+    </div>
+    <!-- Content area -->
+    <div class="settings-content">
+      <div class="settings-content-header">
+        <span class="settings-content-title" id="settingsContentTitle">General</span>
+        <button class="settings-close" id="btnSettingsClose" title="Fechar (Esc)" aria-label="Fechar"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+      </div>
+      <div class="settings-body">
+        <!-- General tab -->
+        <div class="stab-pane active" id="tabGeneral">
+          <div class="settings-group">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">Dark Mode</div>
+              <div class="setting-desc">Use a darker color scheme</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="darkModeToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">Liquid glass</div>
+              <div class="setting-desc">
+                Translucent window. Panes you are not using redraw at 4 fps, so
+                the glass costs about the same as an opaque window.
+                <b>Applies after restarting Norya.</b>
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="glassToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">Floating mascot</div>
+              <div class="setting-desc">
+                Keep your Mini on screen: the pet, a notification for each task
+                (running, needs input, ready) and a chat bar to start a new session.
+                Shortcut: ⌃⌥Space. Drag to move it, click to open Norya, right-click for options.
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="petToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div id="petOptions">
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label">Pet</div>
+                <div class="setting-desc">Auto picks Clawd for Claude tasks and the Codex pet for Codex tasks. None keeps only the chat bar.</div>
+              </div>
+              <div class="seg" id="petKindSeg" role="group" aria-label="Pet">
+                <button class="seg-btn" data-v="auto">Auto</button>
+                <button class="seg-btn" data-v="codex">Codex</button>
+                <button class="seg-btn" data-v="clawd">Clawd</button>
+                <button class="seg-btn" data-v="none">None</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label">Pet size</div>
+                <div class="setting-desc">Adjust the size of your pet</div>
+              </div>
+              <div class="seg" role="group" aria-label="Pet size">
+                <input type="range" id="petSize" min="80" max="224" step="1" value="112" style="width:120px;margin:0 8px">
+                <button class="seg-btn" id="petSizeReset">Reset</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label">Visibility</div>
+                <div class="setting-desc" id="petVisDesc">Keep your Mini on your desktop</div>
+              </div>
+              <div class="seg" id="petVisSeg" role="group" aria-label="Visibility">
+                <button class="seg-btn" data-v="always">Always visible</button>
+                <button class="seg-btn" data-v="onDemand">On demand</button>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+        <!-- Profiles tab -->
+        <div class="stab-pane" id="tabProfiles">
+          <div class="profile-tab-intro">
+            Cada perfil é uma identidade (nome, cor) com seus próprios logins.
+            Conecte quantos providers quiser — a ★ marca o padrão, usado pelo modo Automático.
+          </div>
+          <div class="profile-cards" id="profileCardsList"></div>
+          <div class="profile-add-card" id="profileAddCardBtn">+ Add profile</div>
+        </div>
+        <!-- Stats tab -->
+        <div class="stab-pane" id="tabStats">
+          <div class="stats-toolbar">
+            <div class="seg" id="statsFilterBar" role="group" aria-label="Período">
+              <button class="seg-btn stats-filter-btn" data-filter="today">Hoje</button>
+              <button class="seg-btn stats-filter-btn" data-filter="week">7 dias</button>
+              <button class="seg-btn stats-filter-btn" data-filter="month">30 dias</button>
+              <button class="seg-btn stats-filter-btn" data-filter="cal">Este mês</button>
+              <button class="seg-btn stats-filter-btn active" data-filter="all">Tudo</button>
+              <button class="seg-btn stats-filter-btn" data-filter="custom" title="Escolher datas">Datas…</button>
+            </div>
+            <div class="seg" role="group" aria-label="Provider">
+              <button class="seg-btn stats-provider-btn active" data-provider="all">Todos</button>
+              <button class="seg-btn stats-provider-btn" data-provider="claude">Claude</button>
+              <button class="seg-btn stats-provider-btn" data-provider="codex">Codex</button>
+              <button class="seg-btn stats-provider-btn" data-provider="opencode">OpenCode</button>
+            </div>
+            <button id="statsRefresh" class="stats-refresh" title="Atualizar" aria-label="Atualizar">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.6 2.2v2.6H11"/></svg>
+            </button>
+          </div>
+          <div class="stats-custom-dates hidden" id="statsCustomDates">
+            <input type="date" class="stats-date-input" id="statsDateFrom" aria-label="Data inicial">
+            <span>até</span>
+            <input type="date" class="stats-date-input" id="statsDateTo" aria-label="Data final">
+          </div>
+          <div id="statsContent">
+            <div style="color:var(--text-faint);font-size: 13px;padding:20px 0;text-align:center">Loading statistics…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Merge Queue modal (standalone, accessed from header) ────────────── -->
+<div class="modal-overlay hidden" id="modalMergeQueue">
+  <div class="modal-box" style="max-width:820px;width:90vw;max-height:85vh;display:flex;flex-direction:column;">
+    <div class="modal-title" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Merge Queue</span>
+      <button class="settings-close" id="btnMqClose">✕</button>
+    </div>
+    <!-- Tab switcher: Queue / History -->
+    <div class="mq-tabs" id="mqTabs">
+      <button class="mq-tab active" data-mqtab="queue">Queue</button>
+      <button class="mq-tab" data-mqtab="history">History</button>
+    </div>
+    <div class="mq-tab-pane active" data-mqpane="queue" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <div class="repomem-toolbar">
+        <select id="mqProjectSel" class="tc-select" style="flex:1;max-width:340px"></select>
+        <button class="btn-primary" id="btnMqAnalyze">Analyze branches</button>
+        <button class="btn-cancel" id="btnMqMerge">Smart merge selected</button>
+      </div>
+      <div class="mq-options" id="mqOptions">
+        <label class="mq-opt" title="Stop at the first conflict and offer the agent resolver. When off, conflicted branches are skipped and the queue continues.">
+          <input type="checkbox" id="mqFailStop" checked>
+          <span>Fail-stop on first conflict</span>
+        </label>
+      </div>
+      <div id="mqContent" style="font-size:12px;flex:1;overflow:auto;padding-top:8px"></div>
+    </div>
+    <div class="mq-tab-pane" data-mqpane="history" style="display:none;flex:1;min-height:0;flex-direction:column">
+      <div class="repomem-toolbar">
+        <span style="flex:1;color:var(--text-muted);font-size: 12px">Last 50 merges across all projects.</span>
+        <button class="btn-cancel" id="btnMqHistoryClear">Clear history</button>
+      </div>
+      <div id="mqHistoryContent" style="font-size:12px;flex:1;overflow:auto;padding-top:8px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Rename modal ──────────────────────────────── -->
+<div class="modal-overlay hidden" id="modalRename">
+  <div class="modal-box">
+    <div class="modal-title">Rename Account</div>
+    <div class="modal-field">
+      <label class="modal-label" for="renameInput">New name</label>
+      <input class="modal-input" id="renameInput" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnRenameCancel">Cancel</button>
+      <button class="btn-primary" id="btnRenameConfirm">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Delete confirm modal ──────────────────────── -->
+<div class="modal-overlay hidden" id="modalDelete">
+  <div class="modal-box">
+    <div class="modal-title">Delete profile</div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.5" id="deleteMsg"></p>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnDeleteCancel">Cancel</button>
+      <button class="btn-danger" id="btnDeleteConfirm">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add account modal ─────────────────────────── -->
+<div class="modal-overlay hidden" id="modalAdd">
+  <div class="modal-box">
+    <div class="modal-title">Add Account</div>
+    <div class="modal-field">
+      <label class="modal-label" for="addAccName">Name</label>
+      <input class="modal-input" id="addAccName" placeholder="e.g. my-account" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnAddCancel">Cancel</button>
+      <button class="btn-primary" id="btnAddConfirm">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Fork modal (Norya forks 2026-05-26) ───────── -->
+<div class="modal-overlay hidden" id="modalFork">
+  <div class="modal-box" style="min-width:420px;max-width:480px;">
+    <div class="modal-title">Fork this thread</div>
+    <div class="fork-modal-warn" id="forkModalWarn" style="display:none"></div>
+    <div class="fork-modal-error" id="forkModalErr"></div>
+    <div class="modal-field">
+      <label class="modal-label" for="forkSlugInput">Slug do worktree</label>
+      <input class="modal-input" id="forkSlugInput" autocomplete="off" spellcheck="false" placeholder="ex: fix-auth-bug">
+    </div>
+    <div class="modal-field">
+      <label class="modal-label" for="forkTitleInput">Title (optional)</label>
+      <input class="modal-input" id="forkTitleInput" autocomplete="off" placeholder="(uses the original thread title)">
+    </div>
+    <div class="fork-preview" id="forkPreview">
+      <div class="fork-preview-row"><span class="fork-preview-key">branch</span><span class="fork-preview-val accent" id="forkPreviewBranch">wt/—</span></div>
+      <div class="fork-preview-row"><span class="fork-preview-key">path</span><span class="fork-preview-val" id="forkPreviewPath">~/.codex-panel/worktrees/—/—</span></div>
+      <div class="fork-preview-row"><span class="fork-preview-key">de</span><span class="fork-preview-val" id="forkPreviewSource">—</span></div>
+    </div>
+    <label class="fork-checkbox-row" id="forkOpenGridRow">
+      <input type="checkbox" id="forkOpenGridChk"> Abrir no Grid imediatamente
+    </label>
+    <label class="fork-checkbox-row" id="forkWaitRow" style="display:none">
+      <input type="checkbox" id="forkWaitChk"> Aguardar agente terminar e forkar automaticamente
+    </label>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnForkCancel">Cancel</button>
+      <button class="btn-primary" id="btnForkConfirm">Fork</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Thread modal removed 2026-06-28: New Thread now opens instantly in Home;
+     change the folder afterward via the header folder button. -->
+
+<!-- ── Quota card ─────────────────────────────────── -->
+<div class="quota-card hidden" id="quotaCard"></div>
+
+<!-- ── Lightbox ───────────────────────────────────── -->
+<div class="lightbox hidden" id="lightbox">
+  <button class="lightbox-close" id="lightboxClose">✕</button>
+  <img id="lightboxImg" src="" alt="">
+</div>
+
+<dialog id="providerUpdatesDialog" class="provider-updates-dialog" aria-labelledby="providerUpdatesTitle">
+  <div class="provider-updates-header">
+    <div><h2 id="providerUpdatesTitle">Atualizações dos providers</h2><p>As ferramentas instaladas no seu computador, usadas em todas as contas.</p></div>
+    <button id="providerUpdatesClose" class="settings-close" type="button" aria-label="Fechar">×</button>
+  </div>
+  <div class="provider-updates-toolbar"><span id="providerUpdatesChecked" role="status" aria-live="polite">Ainda não verificado</span><button id="providerUpdatesCheck" class="btn-cancel" type="button">Buscar atualizações</button></div>
+  <div id="providerUpdatesError" role="alert" hidden></div>
+  <div id="providerUpdatesList" class="provider-updates-list"></div>
+  <p class="provider-updates-footnote">Atualizações aguardam as sessões do provider terminarem. Fechar este painel mantém o agendamento; sair do Norya o cancela.</p>
+</dialog>
+
+<dialog id="skillsDialog" class="skills-dialog" aria-labelledby="skillsTitle">
+  <header class="skills-header">
+    <div><p class="skills-eyebrow">BIBLIOTECA UNIVERSAL</p><h2 id="skillsTitle">Skills</h2><p class="skills-intro">Um só lugar. As mesmas skills em todos os providers.</p></div>
+    <button id="skillsClose" class="settings-close" type="button" aria-label="Fechar biblioteca de skills">×</button>
+  </header>
+  <div id="skillsProviders" class="skills-providers" aria-label="Disponíveis para"></div>
+  <div class="skills-toolbar">
+    <input id="skillsSearch" class="modal-input" type="search" placeholder="Buscar por nome, descrição ou origem…" aria-label="Buscar skills" autocomplete="off">
+    <button id="skillsRefresh" class="btn-cancel" type="button">Atualizar</button>
+  </div>
+  <div class="skills-filterbar">
+    <div class="skills-filters" role="group" aria-label="Filtrar por estado">
+      <button type="button" data-skill-filter="all" aria-pressed="true">Todas <span></span></button>
+      <button type="button" data-skill-filter="enabled" aria-pressed="false">Habilitadas <span></span></button>
+      <button type="button" data-skill-filter="disabled" aria-pressed="false">Desabilitadas <span></span></button>
+    </div>
+    <span id="skillsCount" role="status" aria-live="polite"></span>
+  </div>
+  <div id="skillsError" class="skills-message" role="alert" hidden></div>
+  <div id="skillsWarnings" class="skills-message" role="status" hidden></div>
+  <div id="skillsList" class="skills-list" aria-busy="false"></div>
+  <footer class="skills-footer"><span id="skillsFeedback" role="status" aria-live="polite">Alterações valem ao abrir ou retomar uma task.</span><span>Use $nome-da-skill na task. Ferramentas e conexões exigidas pela skill dependem do provider.</span></footer>
+</dialog>
+
+<!-- keycaps ANTES de tudo: KC/kc são globais usados na 1ª renderização -->
+<script src="renderer/keycaps.js"></script>
+<script src="renderer/state.js"></script>
+<script src="renderer/term-replay.js"></script>
+<script src="renderer/latch-filter.js"></script>
+<script src="renderer/tui-redraw.js"></script>
+<script src="renderer/ipc.js"></script>
+<script src="renderer/core.js"></script>
+<script src="renderer/boot-fork.js"></script>
+<script src="renderer/grid.js"></script>
+<script src="renderer/profiles.js"></script>
+<script src="renderer/threads.js"></script>
+<script src="renderer/chat.js"></script>
+<script src="renderer/views.js"></script>
+<script src="renderer/settings.js"></script>
+<script src="renderer/skills.js"></script>
+<script src="renderer/provider-updates.js"></script>
+<script src="renderer/newthread.js"></script>
+<script src="renderer/modals.js"></script>
+
+<!-- Norya Browser Panel -->
+<!-- Find bar do terminal (Cmd+F → renderer/find.js). Overlay único,
+     reposicionado sobre o pane focado ao abrir. -->
+<div id="termFindBar" style="display:none">
+  <input id="tfInput" placeholder="Find in terminal…" autocomplete="off" spellcheck="false">
+  <span id="tfCount"></span>
+  <button id="tfPrev" title="Previous (Shift+Enter)">↑</button>
+  <button id="tfNext" title="Next (Enter)">↓</button>
+  <button id="tfClose" title="Close (Esc)">×</button>
+</div>
+
+<!-- Sem display:none: escondido = translateX(100%) no CSS. O painel fica
+     montado e compositado mesmo fechado — as <webview> continuam vivas em
+     segundo plano e o capturePage de agente funciona (2026-07-14). -->
+<div id="noryaBrowserPanel">
+  <div class="nb-resize-handle" id="nbResize"></div>
+  <div class="nb-header">
+    <span class="nb-profile-name" id="nbProfileName">—</span>
+    <button class="nb-btn" id="nbSettings">Config</button>
+    <!-- Finalizar ≠ Close: Close só esconde (abas seguem vivas em segundo
+         plano, 2026-07-14); Finalizar destrói todas as <webview> e recolhe. -->
+    <button class="nb-btn nb-btn-finish" id="nbFinish" title="Finalizar navegador — fecha todas as abas (⌘⇧W)">Finalizar</button>
+    <button class="nb-btn nb-btn-close" id="nbClose" title="Esconder painel (⌘B) — as abas continuam abertas">Close</button>
+  </div>
+  <div class="nb-tabs" id="nbTabBar">
+    <button class="nb-newtab" id="nbNewTab">+ New tab</button>
+  </div>
+  <div class="nb-nav">
+    <button class="nb-btn" id="nbBack" title="Back (⌘[)">‹ Back</button>
+    <button class="nb-btn" id="nbForward" title="Forward (⌘])">Forward ›</button>
+    <button class="nb-btn" id="nbReload" title="Reload (⌘R)">Reload</button>
+    <input class="nb-addr-input" id="nbAddrInput" placeholder="Search or type an address" spellcheck="false" />
+  </div>
+  <!-- Barra de device (2026-08-01): o viewport da página é independente da
+       largura do painel — ver browser/device-presets.js. -->
+  <div class="nb-device">
+    <select class="nb-device-select" id="nbDevice"
+            title="Emulates viewport metrics only — not user-agent or touch events"></select>
+    <button class="nb-btn nb-device-rotate" id="nbRotate" title="Rotate" aria-label="Rotate">⟳</button>
+    <span class="nb-device-scale" id="nbScaleLabel"></span>
+  </div>
+  <div class="nb-loading" id="nbLoading"></div>
+  <div class="nb-content" id="nbContent">
+    <div class="nb-newtab-home active" id="nbHome">
+      <div style="font-size:15px;font-weight:600;color:var(--text)">Private browser</div>
+      <div style="font-size:12px">Digite um endereço acima. Trackers bloqueados; sessão isolada por perfil.</div>
+    </div>
+  </div>
+  <div class="nb-status">
+    <span id="nbStatusMsg"></span>
+  </div>
+</div>
+
+<!-- Login choice modal (shown when user clicks Login on a profile auth setup) -->
+<div class="nb-modal-backdrop" id="nbLoginModal" style="display:none">
+  <div class="nb-modal">
+    <h3 style="margin-top:0">Login do Profile <span id="nbLoginProfileName"></span></h3>
+    <div style="margin: 12px 0">
+      <label style="display:block; padding:8px; cursor:pointer">
+        <input type="radio" name="nbLoginBrowser" value="norya" checked />
+        <strong>Norya — MAX Anonymous Mode</strong>
+        <div style="color:var(--text-muted); font-size:12px; margin-left:24px">Ephemeral browser, new Tor IP, zero fingerprint, zero traces</div>
+      </label>
+      <label style="display:block; padding:8px; cursor:pointer">
+        <input type="radio" name="nbLoginBrowser" value="system" />
+        <strong>System browser</strong>
+        <div style="color:var(--text-muted); font-size:12px; margin-left:24px">Standard Chrome/Safari/Firefox</div>
+      </label>
+    </div>
+    <label style="display:block; margin: 12px 0">
+      <input type="checkbox" id="nbLoginRemember" />
+      Lembrar minha escolha pra este perfil
+    </label>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px">
+      <button class="header-btn" id="nbLoginCancel">Cancel</button>
+      <button class="header-btn" id="nbLoginContinue" style="background:#2196f3; color:#fff">Continue</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="nb-modal-backdrop" id="nbSettingsModal" style="display:none">
+  <div class="nb-modal" style="width:560px; max-width:90vw; max-height:80vh; overflow:auto">
+    <h3 style="margin-top:0">Browser — Settings</h3>
+    <div class="nb-settings-tabs">
+      <div class="nb-settings-tab active" data-tab="bookmarks">Bookmarks</div>
+      <div class="nb-settings-tab" data-tab="about">Sobre</div>
+      <div class="nb-settings-tab" data-tab="privacy">Privacidade</div>
+    </div>
+    <div class="nb-settings-panel" data-panel="bookmarks">
+      <div id="nbBmList">Loading…</div>
+    </div>
+    <div class="nb-settings-panel" data-panel="about" style="display:none">
+      <div id="nbAboutBody"></div>
+    </div>
+    <div class="nb-settings-panel" data-panel="privacy" style="display:none">
+      <p style="color:var(--text-muted); margin-top:0">
+        Apaga cookies, logins e storage deste perfil. As abas abertas continuam,
+        mas você será deslogado de todos os sites. Não tem desfazer.
+      </p>
+      <button class="header-btn" id="nbClearData" style="color:#c62828">Limpar dados do perfil</button>
+      <span id="nbClearDataStatus" style="margin-left:8px; color:var(--text-muted)"></span>
+    </div>
+    <div style="text-align:right; margin-top:16px">
+      <button class="header-btn" id="nbSettingsClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- IPC contract for Norya Browser (integration step in main.js will wire these):
+  window.electronAPI.noryaBrowser = {
+    openPanel(profileId, opts),
+    closePanel(profileId),
+    isPanelOpen(profileId),
+    openTab(profileId, url, opts),
+    closeTab(profileId, tabId),
+    listTabs(profileId),
+    setActiveTab(profileId, tabId),
+    resizePanelWidth(profileId, width),
+    navigateTab(profileId, tabId, action, params),
+    // Bookmarks:
+    bookmarksList(profileId),
+    bookmarksAdd(profileId, url, title),
+    bookmarksRemove(profileId, id),
+    // Login flow choice:
+    setLoginBrowserChoice(profileId, choice, remember),
+    getLoginBrowserChoice(profileId),
+    // Events (subscribe via on/off):
+    on(event, handler),  // events: 'tab-opened', 'tab-closed', 'tab-title-changed', 'tab-url-changed', 'panel-open', 'panel-close'
+    off(event, handler),
+  };
+-->
+<script src="renderer/agents.js"></script>
+<script src="renderer/rail.js"></script>
+<script src="browser/device-presets.js"></script>
+<script src="renderer/browser.js"></script>
+<script src="renderer/find.js"></script>
+<script src="renderer/attention.js"></script>
+<script src="renderer/pet.js"></script>
+</body>
+</html>

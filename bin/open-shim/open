@@ -1,0 +1,59 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# norya open-shim
+#
+# Substitui o `open` do macOS DENTRO dos PTYs que o Norya spawna. O diretório
+# que contém este arquivo é prependado ao PATH, então quando o codex, o claude,
+# o `python -m webbrowser` ou qualquer outra CLI chama `open <url>`, cai aqui.
+#
+# Regras:
+#   • Só intercepta http:// e https://. `open .`, `open -a Preview foo.pdf` e
+#     tudo mais passa direto para o /usr/bin/open de verdade.
+#   • Fluxo de login tem precedência: se NORYA_AUTH_SOCKET existe, a URL vai
+#     para o roteador de auth (comportamento antigo, preservado).
+#   • Se não houver socket, ou o envio falhar, cai no /usr/bin/open. Uma URL
+#     nunca é engolida em silêncio.
+#
+# Chamamos /usr/bin/open pelo caminho ABSOLUTO — senão o PATH nos traria de
+# volta aqui, em recursão infinita.
+#
+# Também serve de alvo para $BROWSER (recebe a URL como único argumento).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# NORYA_REAL_OPEN existe para os testes (test/open-shim.test.js) poderem observar
+# o passthrough sem abrir o Finder. Em produção ninguém define essa variável.
+REAL_OPEN="${NORYA_REAL_OPEN:-/usr/bin/open}"
+[ -x "$REAL_OPEN" ] || REAL_OPEN=$(command -v xdg-open 2>/dev/null)
+
+URL=""
+for arg in "$@"; do
+  case "$arg" in
+    http://*|https://*) URL="$arg"; break ;;
+  esac
+done
+
+SOCK=""
+if [ -n "$NORYA_AUTH_SOCKET" ]; then
+  SOCK="$NORYA_AUTH_SOCKET"
+elif [ -n "$NORYA_OPEN_SOCKET" ]; then
+  SOCK="$NORYA_OPEN_SOCKET"
+fi
+
+if [ -n "$URL" ] && [ -n "$SOCK" ] && command -v node >/dev/null 2>&1; then
+  # Sai assim que a escrita é DESCARREGADA — não quando o servidor fecha. Esperar
+  # o evento "close" tornaria o shim refém do outro lado: um servidor ocupado
+  # faria o timeout estourar e a URL abriria no navegador do sistema também.
+  node -e '
+    const net = require("net");
+    const [url, sock] = process.argv.slice(1);
+    const c = net.createConnection(sock, () => {
+      c.end(JSON.stringify({ url, ts: Date.now() }), () => process.exit(0));
+    });
+    c.on("error", () => process.exit(1));
+    setTimeout(() => process.exit(1), 2000);
+  ' "$URL" "$SOCK" 2>/dev/null && exit 0
+fi
+
+# Fallback: navegador do sistema.
+[ -n "$REAL_OPEN" ] || exit 1
+exec "$REAL_OPEN" "$@"
